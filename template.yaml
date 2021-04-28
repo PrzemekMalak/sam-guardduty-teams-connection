@@ -1,0 +1,97 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+  TeamsWebHook: 
+    Type: String
+
+Resources:
+  EventRuleApiConnectionRole:
+    Type: AWS::IAM::Role
+    Properties: 
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - events.amazonaws.com
+          Action:
+          - 'sts:AssumeRole'
+      Policies: 
+        - PolicyName: !Sub '${AWS::StackName}-EventRuleApiConnectionPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                - events:InvokeApiDestination
+                Resource:
+                - !GetAtt EventRuleApiDestination.Arn
+
+  GuardDutyEventRule:
+    Type: AWS::Events::Rule
+    Properties: 
+      Targets:
+        - Arn: !GetAtt EventRuleApiDestination.Arn
+          Id: api
+          RoleArn: !GetAtt EventRuleApiConnectionRole.Arn
+          InputTransformer:
+            InputPathsMap:
+              title: $.detail.title
+              account: $.detail.accountId
+              description: $.detail.description
+            # MS Teams
+            InputTemplate: >
+                {
+                  "themeColor": "FFA500",
+                  "title": <title>,
+                  "text": "Account: <account> Finding <description>"
+                }
+            # Slack
+#            InputTemplate: >
+#                {
+#                  "text": "Account: <account> Finding title <title> and description <description>"
+#                }
+          DeadLetterConfig:
+              Arn: !GetAtt DeadLetterQueue.Arn
+      EventPattern: {"source": ["aws.guardduty"],"detail-type": ["GuardDuty Finding"]}
+
+
+  EventRuleConnection:
+    Type: AWS::Events::Connection
+    Properties: 
+      AuthorizationType: BASIC 
+      AuthParameters: 
+        BasicAuthParameters:
+          Password: x
+          Username: x
+
+  EventRuleApiDestination:
+    Type: AWS::Events::ApiDestination
+    Properties: 
+      ConnectionArn: !GetAtt EventRuleConnection.Arn
+      HttpMethod: POST
+      InvocationRateLimitPerSecond: 10
+
+      InvocationEndpoint: !Ref TeamsWebHook 
+
+  DeadLetterQueue:
+      Type: AWS::SQS::Queue
+
+  DeadLetterQueuePolicy:
+      Type: AWS::SQS::QueuePolicy
+      Properties: 
+        PolicyDocument:
+          Statement:
+            - Action: 
+                - sqs:SendMessage
+              Effect: Allow
+              Resource: !GetAtt DeadLetterQueue.Arn
+              Principal:  
+                Service: events.amazonaws.com
+              Condition:
+                ArnEquals:
+                  "aws:SourceArn": !GetAtt GuardDutyEventRule.Arn
+        Queues: 
+          - !Ref DeadLetterQueue
